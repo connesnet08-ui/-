@@ -5,6 +5,7 @@ const siliconFlowBaseUrl = (
 ).replace(/\/$/, "");
 
 const model = process.env.SILICONFLOW_MODEL || "Qwen/Qwen3-8B";
+const upstreamUrl = `${siliconFlowBaseUrl}/chat/completions`;
 
 const systemPrompt = [
   "你是一个中文职场语境翻译专家，专门把互联网公司黑话翻译成直白、具体、可执行的大白话。",
@@ -59,6 +60,16 @@ function normalizeResult(parsed) {
   };
 }
 
+function logUpstreamFailure({ status, body, error }) {
+  console.error("SiliconFlow upstream failure", {
+    status,
+    body,
+    model,
+    upstreamUrl,
+    error: error instanceof Error ? error.message : undefined,
+  });
+}
+
 export async function POST(request) {
   const apiKey = process.env.SILICONFLOW_API_KEY;
 
@@ -90,38 +101,60 @@ export async function POST(request) {
   }
 
   try {
-    const upstreamResponse = await fetch(
-      `${siliconFlowBaseUrl}/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.SILICONFLOW_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: systemPrompt },
-            {
-              role: "user",
-              content: `请翻译这句互联网黑话：\n${sourceText}`,
-            },
-          ],
-          max_tokens: 1200,
-          temperature: 0.2,
-          response_format: { type: "json_object" },
-        }),
-      }
-    );
+    const upstreamResponse = await fetch(upstreamUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.SILICONFLOW_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: `请翻译这句互联网黑话：\n${sourceText}`,
+          },
+        ],
+        max_tokens: 1200,
+        temperature: 0.2,
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    const upstreamText = await upstreamResponse.text();
 
     if (!upstreamResponse.ok) {
+      logUpstreamFailure({
+        status: upstreamResponse.status,
+        body: upstreamText,
+      });
+
       return Response.json(
-        { error: "翻译服务暂时不可用，请稍后再试。" },
+        {
+          error: `翻译服务暂时不可用，请稍后再试。上游状态码：${upstreamResponse.status}`,
+        },
         { status: 502 }
       );
     }
 
-    const upstreamPayload = await upstreamResponse.json();
+    let upstreamPayload;
+
+    try {
+      upstreamPayload = JSON.parse(upstreamText);
+    } catch (error) {
+      logUpstreamFailure({
+        status: upstreamResponse.status,
+        body: upstreamText,
+        error,
+      });
+
+      return Response.json(
+        { error: "翻译服务返回格式异常，请稍后再试。" },
+        { status: 502 }
+      );
+    }
+
     const content = upstreamPayload.choices?.[0]?.message?.content || "{}";
     const parsed = extractJson(content);
 
@@ -130,7 +163,13 @@ export async function POST(request) {
       model,
       provider: "SiliconFlow",
     });
-  } catch {
+  } catch (error) {
+    logUpstreamFailure({
+      status: "request_failed",
+      body: "",
+      error,
+    });
+
     return Response.json(
       { error: "翻译服务暂时不可用，请稍后再试。" },
       { status: 502 }
