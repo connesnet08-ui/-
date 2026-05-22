@@ -1,12 +1,13 @@
-export const runtime = "nodejs";
-export const dynamic = "force-dynamic";
-
 const siliconFlowBaseUrl = (
   process.env.SILICONFLOW_BASE_URL || "https://api.siliconflow.cn/v1"
 ).replace(/\/$/, "");
 
 const model = process.env.SILICONFLOW_MODEL || "Qwen/Qwen3-8B";
 const upstreamUrl = `${siliconFlowBaseUrl}/chat/completions`;
+
+const jsonHeaders = {
+  "Content-Type": "application/json; charset=utf-8",
+};
 
 const systemPrompt = [
   "你是一个中文职场语境翻译专家，专门把互联网公司黑话翻译成直白、具体、可执行的大白话。",
@@ -20,6 +21,14 @@ const systemPrompt = [
   "concepts 中每项必须包含 term、plain、explanation、evidence、confidence。",
   "confidence 只能是“高”“中”“低”。",
 ].join("\n");
+
+function json(statusCode, payload) {
+  return {
+    statusCode,
+    headers: jsonHeaders,
+    body: JSON.stringify(payload),
+  };
+}
 
 function extractJson(text) {
   try {
@@ -71,38 +80,36 @@ function logUpstreamFailure({ status, body, error }) {
   });
 }
 
-export async function GET() {
-  return Response.json({ ok: true, message: "translate api is alive" });
-}
+exports.handler = async function handler(event) {
+  if (event.httpMethod === "GET") {
+    return json(200, { ok: true, message: "translate function is alive" });
+  }
 
-export async function POST(request) {
+  if (event.httpMethod !== "POST") {
+    return json(405, { error: "Method not allowed" });
+  }
+
   const apiKey = process.env.SILICONFLOW_API_KEY;
 
   if (!apiKey) {
-    return Response.json(
-      { error: "Missing SILICONFLOW_API_KEY" },
-      { status: 500 }
-    );
+    return json(500, { error: "Missing SILICONFLOW_API_KEY" });
   }
 
   let sourceText = "";
 
   try {
-    const body = await request.json();
+    const body = JSON.parse(event.body || "{}");
     sourceText = typeof body.text === "string" ? body.text.trim() : "";
   } catch {
-    return Response.json({ error: "请求格式不正确。" }, { status: 400 });
+    return json(400, { error: "请求格式不正确。" });
   }
 
   if (!sourceText) {
-    return Response.json({ error: "请输入需要翻译的原话。" }, { status: 400 });
+    return json(400, { error: "请输入需要翻译的原话。" });
   }
 
   if (sourceText.length > 2000) {
-    return Response.json(
-      { error: "原话太长了，请控制在 2000 字以内。" },
-      { status: 400 }
-    );
+    return json(400, { error: "原话太长了，请控制在 2000 字以内。" });
   }
 
   try {
@@ -135,12 +142,9 @@ export async function POST(request) {
         body: upstreamText,
       });
 
-      return Response.json(
-        {
-          error: `翻译服务暂时不可用，请稍后再试。上游状态码：${upstreamResponse.status}`,
-        },
-        { status: 502 }
-      );
+      return json(502, {
+        error: `翻译服务暂时不可用，请稍后再试。上游状态码：${upstreamResponse.status}`,
+      });
     }
 
     let upstreamPayload;
@@ -154,16 +158,13 @@ export async function POST(request) {
         error,
       });
 
-      return Response.json(
-        { error: "翻译服务返回格式异常，请稍后再试。" },
-        { status: 502 }
-      );
+      return json(502, { error: "翻译服务返回格式异常，请稍后再试。" });
     }
 
     const content = upstreamPayload.choices?.[0]?.message?.content || "{}";
     const parsed = extractJson(content);
 
-    return Response.json({
+    return json(200, {
       ...normalizeResult(parsed),
       model,
       provider: "SiliconFlow",
@@ -175,9 +176,6 @@ export async function POST(request) {
       error,
     });
 
-    return Response.json(
-      { error: "翻译服务暂时不可用，请稍后再试。" },
-      { status: 502 }
-    );
+    return json(502, { error: "翻译服务暂时不可用，请稍后再试。" });
   }
-}
+};

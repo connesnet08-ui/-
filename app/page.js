@@ -21,6 +21,19 @@ const emptyResult = {
   followUps: [],
 };
 
+const translateEndpoint = "/.netlify/functions/translate";
+
+function buildNonJsonError(response, contentType, responseText) {
+  const preview = responseText.slice(0, 300).replace(/\s+/g, " ").trim();
+
+  return [
+    "翻译接口没有返回 JSON。",
+    `状态码：${response.status}`,
+    `Content-Type：${contentType || "未提供"}`,
+    `响应前 300 字符：${preview || "空响应"}`,
+  ].join(" ");
+}
+
 export default function Home() {
   const [sourceText, setSourceText] = useState(defaultInput);
   const [result, setResult] = useState(emptyResult);
@@ -43,7 +56,7 @@ export default function Home() {
     setIsLoading(true);
 
     try {
-      const response = await fetch("/api/translate", {
+      const response = await fetch(translateEndpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -51,7 +64,24 @@ export default function Home() {
         body: JSON.stringify({ text }),
       });
 
-      const payload = await response.json();
+      const responseText = await response.text();
+      const contentType = response.headers.get("content-type") || "";
+      const isJson = contentType.toLowerCase().includes("application/json");
+
+      if (!isJson) {
+        throw new Error(buildNonJsonError(response, contentType, responseText));
+      }
+
+      let payload;
+
+      try {
+        payload = JSON.parse(responseText);
+      } catch (parseError) {
+        const preview = responseText.slice(0, 300).replace(/\s+/g, " ").trim();
+        throw new Error(
+          `翻译接口返回了无效 JSON。状态码：${response.status}。解析错误：${parseError.message}。响应前 300 字符：${preview || "空响应"}`
+        );
+      }
 
       if (!response.ok) {
         throw new Error(payload.error || "翻译失败，请稍后再试。");

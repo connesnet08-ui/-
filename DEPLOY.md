@@ -86,8 +86,9 @@ https://your-project.vercel.app
 
 ## 6. 安全注意事项
 
-- 前端只能请求本项目的 `/api/translate`。
-- SiliconFlow 请求只允许放在 `app/api/translate/route.js` 这类服务端 API Route 中。
+- Netlify 部署时，前端请求本项目的 `/.netlify/functions/translate`。
+- Next.js 部署时，也保留了本项目的 `/api/translate` 服务端 API Route。
+- SiliconFlow 请求只允许放在服务端代码中，例如 `app/api/translate/route.js` 或 `netlify/functions/translate.js`。
 - API Key 只能通过 `process.env.SILICONFLOW_API_KEY` 在服务端读取。
 - 不要把 SiliconFlow API Key 放进任何以 `NEXT_PUBLIC_` 开头的变量。
 - `NEXT_PUBLIC_` 变量会进入浏览器环境，不能存放密钥。
