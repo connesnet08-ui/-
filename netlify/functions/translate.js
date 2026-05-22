@@ -4,14 +4,14 @@ const siliconFlowBaseUrl = (
 
 const model = process.env.SILICONFLOW_MODEL || "Qwen/Qwen3-8B";
 const upstreamUrl = `${siliconFlowBaseUrl}/chat/completions`;
-const timeoutMs = 25000;
+const timeoutMs = 18000;
 
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
 };
 
 const systemPrompt =
-  "把互联网公司黑话翻译成简短大白话。只输出翻译结果，不要分析过程，不要 Markdown。";
+  "你是一个职场黑话翻译器。把用户输入的领导黑话翻译成简短、直接、普通人能听懂的大白话。只输出翻译结果，不要解释，不要列步骤，不要加标题。";
 
 function json(statusCode, payload) {
   return {
@@ -24,11 +24,15 @@ function json(statusCode, payload) {
 function logUpstreamFailure({ status, body, error, timeout = false }) {
   console.error("SiliconFlow upstream failure", {
     status,
-    body: typeof body === "string" ? body.slice(0, 500) : "",
+    body: typeof body === "string" ? body.slice(0, 300) : "",
     model,
     timeout,
     error: error instanceof Error ? error.message : undefined,
   });
+}
+
+function stripThinkTags(text) {
+  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
 }
 
 exports.handler = async function handler(event) {
@@ -80,12 +84,12 @@ exports.handler = async function handler(event) {
           { role: "system", content: systemPrompt },
           {
             role: "user",
-            content: `请翻译这句互联网黑话：\n${sourceText}`,
+            content: sourceText,
           },
         ],
         enable_thinking: false,
-        max_tokens: 300,
-        temperature: 0.2,
+        max_tokens: 160,
+        temperature: 0.1,
         stream: false,
       }),
     });
@@ -123,7 +127,7 @@ exports.handler = async function handler(event) {
 
     const content = upstreamPayload.choices?.[0]?.message?.content;
     const translation =
-      typeof content === "string" ? content.trim() : "";
+      typeof content === "string" ? stripThinkTags(content) : "";
 
     return json(200, {
       translation: translation || "模型没有返回翻译结果。",
@@ -147,7 +151,7 @@ exports.handler = async function handler(event) {
 
     if (isTimeout) {
       return json(504, {
-        error: "SiliconFlow request timeout, please try again.",
+        error: "模型响应超时，请再试一次。",
       });
     }
 
