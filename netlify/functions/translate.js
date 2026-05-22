@@ -4,23 +4,14 @@ const siliconFlowBaseUrl = (
 
 const model = process.env.SILICONFLOW_MODEL || "Qwen/Qwen3-8B";
 const upstreamUrl = `${siliconFlowBaseUrl}/chat/completions`;
+const timeoutMs = 25000;
 
 const jsonHeaders = {
   "Content-Type": "application/json; charset=utf-8",
 };
 
-const systemPrompt = [
-  "你是一个中文职场语境翻译专家，专门把互联网公司黑话翻译成直白、具体、可执行的大白话。",
-  "不要做机械词典替换，要结合整句话、上下文和常见职场语境判断真实含义。",
-  "保留必要的业务名词、人名、项目名和数字；不要把所有词都过度翻译。",
-  "如果原话里有空泛表达，要指出它大概率缺少哪些具体信息。",
-  "语气要直接、清楚、略带口语，但不要恶意嘲讽。",
-  "只解释原话中确实出现或强相关的概念，不要为了凑数量编造。",
-  "只返回 JSON，不要返回 Markdown、代码块或额外说明。",
-  "JSON 字段必须是 translation、intent、concepts、followUps。",
-  "concepts 中每项必须包含 term、plain、explanation、evidence、confidence。",
-  "confidence 只能是“高”“中”“低”。",
-].join("\n");
+const systemPrompt =
+  "把互联网公司黑话翻译成简短大白话。只输出翻译结果，不要分析过程，不要 Markdown。";
 
 function json(statusCode, payload) {
   return {
@@ -30,52 +21,12 @@ function json(statusCode, payload) {
   };
 }
 
-function extractJson(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const match = text.match(/\{[\s\S]*\}/);
-    if (!match) {
-      throw new Error("Invalid model JSON");
-    }
-    return JSON.parse(match[0]);
-  }
-}
-
-function normalizeResult(parsed) {
-  return {
-    translation:
-      typeof parsed.translation === "string" ? parsed.translation : "",
-    intent: typeof parsed.intent === "string" ? parsed.intent : "",
-    concepts: Array.isArray(parsed.concepts)
-      ? parsed.concepts.slice(0, 6).map((concept) => ({
-          term: typeof concept.term === "string" ? concept.term : "",
-          plain: typeof concept.plain === "string" ? concept.plain : "",
-          explanation:
-            typeof concept.explanation === "string" ? concept.explanation : "",
-          evidence: typeof concept.evidence === "string" ? concept.evidence : "",
-          confidence:
-            concept.confidence === "高" ||
-            concept.confidence === "中" ||
-            concept.confidence === "低"
-              ? concept.confidence
-              : "中",
-        }))
-      : [],
-    followUps: Array.isArray(parsed.followUps)
-      ? parsed.followUps
-          .filter((item) => typeof item === "string")
-          .slice(0, 3)
-      : [],
-  };
-}
-
-function logUpstreamFailure({ status, body, error }) {
+function logUpstreamFailure({ status, body, error, timeout = false }) {
   console.error("SiliconFlow upstream failure", {
     status,
-    body,
+    body: typeof body === "string" ? body.slice(0, 500) : "",
     model,
-    upstreamUrl,
+    timeout,
     error: error instanceof Error ? error.message : undefined,
   });
 }
@@ -112,9 +63,13 @@ exports.handler = async function handler(event) {
     return json(400, { error: "原话太长了，请控制在 2000 字以内。" });
   }
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
   try {
     const upstreamResponse = await fetch(upstreamUrl, {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.SILICONFLOW_API_KEY}`,
@@ -128,11 +83,14 @@ exports.handler = async function handler(event) {
             content: `请翻译这句互联网黑话：\n${sourceText}`,
           },
         ],
-        max_tokens: 1200,
+        enable_thinking: false,
+        max_tokens: 300,
         temperature: 0.2,
-        response_format: { type: "json_object" },
+        stream: false,
       }),
     });
+
+    clearTimeout(timeout);
 
     const upstreamText = await upstreamResponse.text();
 
@@ -143,7 +101,9 @@ exports.handler = async function handler(event) {
       });
 
       return json(502, {
-        error: `翻译服务暂时不可用，请稍后再试。上游状态码：${upstreamResponse.status}`,
+        error: "SiliconFlow upstream failure",
+        status: upstreamResponse.status,
+        detail: upstreamText.slice(0, 300),
       });
     }
 
@@ -161,20 +121,35 @@ exports.handler = async function handler(event) {
       return json(502, { error: "翻译服务返回格式异常，请稍后再试。" });
     }
 
-    const content = upstreamPayload.choices?.[0]?.message?.content || "{}";
-    const parsed = extractJson(content);
+    const content = upstreamPayload.choices?.[0]?.message?.content;
+    const translation =
+      typeof content === "string" ? content.trim() : "";
 
     return json(200, {
-      ...normalizeResult(parsed),
+      translation: translation || "模型没有返回翻译结果。",
+      intent: "",
+      concepts: [],
+      followUps: [],
       model,
       provider: "SiliconFlow",
     });
   } catch (error) {
+    clearTimeout(timeout);
+
+    const isTimeout = error instanceof Error && error.name === "AbortError";
+
     logUpstreamFailure({
-      status: "request_failed",
+      status: isTimeout ? "timeout" : "request_failed",
       body: "",
       error,
+      timeout: isTimeout,
     });
+
+    if (isTimeout) {
+      return json(504, {
+        error: "SiliconFlow request timeout, please try again.",
+      });
+    }
 
     return json(502, { error: "翻译服务暂时不可用，请稍后再试。" });
   }
